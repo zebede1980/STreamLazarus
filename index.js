@@ -77,17 +77,45 @@ function saveSettings() {
  * A recovery is triggered when the page becomes visible while isGenerating is still true.
  */
 
+function onMessageSent() {
+    // Arm as early as possible — MESSAGE_SENT fires the instant the user taps Send,
+    // before any network round-trip to the AI API. This covers the race condition
+    // where the user locks the phone in the seconds between Send and the first token
+    // arriving (which is when GENERATION_STARTED would otherwise fire).
+    const context = SillyTavern.getContext();
+    isGenerating = true;
+    chatLengthAtStart = context.chat?.length ?? 0;
+    log('User message sent — recovery armed. Chat length:', chatLengthAtStart);
+}
+
 function onGenerationStarted(type, _params, isDryRun) {
-    // Ignore background/dry-run generations triggered by other extensions (e.g. Summarize).
-    // 'quiet' and 'impersonate' never produce a visible AI message in the chat.
+    // Ignore background/dry-run generations (e.g. Summarize, Objective extensions).
     if (isDryRun || type === 'quiet' || type === 'impersonate') {
         log(`Ignoring generation start (type=${type}, isDryRun=${isDryRun}).`);
         return;
     }
+    // Refine chatLengthAtStart — by GENERATION_STARTED, ST has finished pre-generation
+    // processing, making this the most accurate baseline for the new-content check.
+    // isGenerating was already set by onMessageSent; set it again as a safety net
+    // for group chat auto-replies (which don't always emit MESSAGE_SENT first).
     const context = SillyTavern.getContext();
     isGenerating = true;
     chatLengthAtStart = context.chat?.length ?? 0;
-    log('Generation started. Chat length:', chatLengthAtStart);
+    log('Generation started (refined). Chat length:', chatLengthAtStart);
+}
+
+function onGenerationEnded() {
+    // If the page is visible, generation finished (or errored) while the user was
+    // actively watching — no recovery needed, clear the flag.
+    // If the page is hidden (iOS suspended), do NOT clear — visibilitychange will
+    // handle recovery when the user returns.
+    if (document.visibilityState === 'visible' && !recovering) {
+        if (isGenerating) {
+            log('Generation ended while page visible — clearing armed flag.');
+            isGenerating = false;
+        }
+        stopPolling();
+    }
 }
 
 function onGenerationComplete() {
@@ -451,15 +479,26 @@ function bindSettingsControls() {
 function registerEvents() {
     const { eventSource, event_types } = SillyTavern.getContext();
 
+    // Arm immediately when user hits Send — before the network round-trip to the API.
+    // This catches the race condition where the phone is locked in the first few seconds
+    // after Send but before the first streaming token arrives.
+    eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
+
+    // Refine chatLengthAtStart once ST has finished pre-generation processing.
+    // Also arms isGenerating for group auto-replies that skip MESSAGE_SENT.
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
 
-    // Clear the flag on a successful response rendered in the UI
+    // Clear the flag on a successful response rendered in the UI.
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onGenerationComplete);
 
-    // Clear on user cancel
+    // Clear when generation ends while the user is actively watching
+    // (covers API errors, empty responses, etc. that don't trigger MESSAGE_RENDERED).
+    eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
+
+    // Clear on user cancel.
     eventSource.on(event_types.GENERATION_STOPPED, onGenerationStopped);
 
-    // Clear on chat switch
+    // Clear on chat switch.
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 }
 
@@ -467,7 +506,9 @@ function unregisterEvents() {
     const { eventSource, event_types } = SillyTavern.getContext();
 
     eventSource.removeListener(event_types.GENERATION_STARTED, onGenerationStarted);
+    eventSource.removeListener(event_types.MESSAGE_SENT, onMessageSent);
     eventSource.removeListener(event_types.CHARACTER_MESSAGE_RENDERED, onGenerationComplete);
+    eventSource.removeListener(event_types.GENERATION_ENDED, onGenerationEnded);
     eventSource.removeListener(event_types.GENERATION_STOPPED, onGenerationStopped);
     eventSource.removeListener(event_types.CHAT_CHANGED, onChatChanged);
 }
