@@ -40,6 +40,10 @@ let pollTimer = null;
 let pollAttempts = 0;
 /** Whether a recovery cycle is currently running (prevents overlapping cycles) */
 let recovering = false;
+/** True while we are inside our own reloadCurrentChat() call — prevents the
+ *  CHARACTER_MESSAGE_RENDERED event (fired by ST when re-rendering messages) from
+ *  being mistaken for a natural generation completion and clearing our state early. */
+let isReloading = false;
 
 /* ─── Settings helpers ────────────────────────────────────────── */
 
@@ -73,7 +77,13 @@ function saveSettings() {
  * A recovery is triggered when the page becomes visible while isGenerating is still true.
  */
 
-function onGenerationStarted() {
+function onGenerationStarted(type, _params, isDryRun) {
+    // Ignore background/dry-run generations triggered by other extensions (e.g. Summarize).
+    // 'quiet' and 'impersonate' never produce a visible AI message in the chat.
+    if (isDryRun || type === 'quiet' || type === 'impersonate') {
+        log(`Ignoring generation start (type=${type}, isDryRun=${isDryRun}).`);
+        return;
+    }
     const context = SillyTavern.getContext();
     isGenerating = true;
     chatLengthAtStart = context.chat?.length ?? 0;
@@ -81,9 +91,13 @@ function onGenerationStarted() {
 }
 
 function onGenerationComplete() {
+    // CHARACTER_MESSAGE_RENDERED also fires when ST re-renders messages during our
+    // own reloadCurrentChat() call. Ignore those — we handle the outcome in reloadAndCheck().
+    if (isReloading) return;
     if (!isGenerating) return;
     log('Generation completed normally — no recovery needed.');
     isGenerating = false;
+    recovering = false;
     stopPolling();
     hideSyncButton();
     hideBanner();
@@ -159,7 +173,14 @@ async function reloadAndCheck() {
     const context = SillyTavern.getContext();
     const chatLengthBefore = context.chat?.length ?? 0;
 
-    await context.reloadCurrentChat();
+    // Guard: prevent CHARACTER_MESSAGE_RENDERED (fired during reload) from
+    // prematurely clearing isGenerating and stopping the polling loop.
+    isReloading = true;
+    try {
+        await context.reloadCurrentChat();
+    } finally {
+        isReloading = false;
+    }
 
     // After reload, re-read context (reference may be the same array but refreshed)
     const chatLengthAfter = SillyTavern.getContext().chat?.length ?? 0;
@@ -234,8 +255,12 @@ function onRecoverySuccess() {
 }
 
 function onRecoveryFailed() {
+    // Clear isGenerating so that subsequent visibilitychange events (notification
+    // banners, briefly switching apps, iOS keyboard interactions) do NOT trigger
+    // another spurious reloadCurrentChat() and cause UI flicker.
+    // The manual sync button is always available for an on-demand retry.
+    isGenerating = false;
     recovering = false;
-    // Leave isGenerating true so the manual sync button can still try
     hideBanner();
     hideSyncButton(); // hide spinning state
     showSyncButton(false); // show idle state for manual retry
@@ -246,7 +271,7 @@ function onRecoveryFailed() {
         : Math.round(settings.recoveryDelay / 1000);
 
     toastr.warning(
-        `No response found after ${totalWaitSec}s. The backend may still be generating — tap the sync button to try again.`,
+        `No response found after ${totalWaitSec}s. Tap the sync button to try again.`,
         'Stream Lazarus',
         { timeOut: 6000 },
     );
@@ -304,9 +329,12 @@ function hideSyncButton() {
 
 async function onManualSync() {
     if (recovering) return;
-    log('Manual sync triggered.');
-    // Reset so attemptRecovery won't bail out due to recovering=true
-    recovering = false;
+    log('Manual sync triggered manually.');
+    // Re-arm isGenerating so attemptRecovery() proceeds even after a failed recovery
+    // cycle cleared it. Reset chatLengthAtStart to current length so the new-content
+    // check compares against what's on screen right now.
+    isGenerating = true;
+    chatLengthAtStart = SillyTavern.getContext().chat?.length ?? 0;
     await attemptRecovery();
 }
 
