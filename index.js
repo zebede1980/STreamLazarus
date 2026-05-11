@@ -40,6 +40,10 @@ let pollTimer = null;
 let pollAttempts = 0;
 /** Whether a recovery cycle is currently running (prevents overlapping cycles) */
 let recovering = false;
+/** Set as soon as visibilitychange decides recovery is needed, before the sleep delay.
+ *  Prevents onGenerationEnded from clearing isGenerating during the recovery window
+ *  when iOS resumes deferred async work (stream error handlers, etc.) after unsuspending. */
+let awaitingRecovery = false;
 /** True while we are inside our own reloadCurrentChat() call — prevents the
  *  CHARACTER_MESSAGE_RENDERED event (fired by ST when re-rendering messages) from
  *  being mistaken for a natural generation completion and clearing our state early. */
@@ -105,11 +109,13 @@ function onGenerationStarted(type, _params, isDryRun) {
 }
 
 function onGenerationEnded() {
-    // If the page is visible, generation finished (or errored) while the user was
-    // actively watching — no recovery needed, clear the flag.
-    // If the page is hidden (iOS suspended), do NOT clear — visibilitychange will
-    // handle recovery when the user returns.
-    if (document.visibilityState === 'visible' && !recovering) {
+    // If the page is visible and we are NOT in a recovery window, generation finished
+    // (or errored) while the user was actively watching — clear the flag.
+    // Do NOT clear if awaitingRecovery or recovering is set: this means the user
+    // just returned to the page and iOS is resuming deferred async work (the stream
+    // reader error handler from when the connection was killed). Clearing here would
+    // cause onVisibilityChange to think the stream recovered on its own and bail out.
+    if (document.visibilityState === 'visible' && !awaitingRecovery && !recovering) {
         if (isGenerating) {
             log('Generation ended while page visible — clearing armed flag.');
             isGenerating = false;
@@ -126,10 +132,10 @@ function onGenerationComplete() {
     log('Generation completed normally — no recovery needed.');
     isGenerating = false;
     recovering = false;
+    awaitingRecovery = false;
     stopPolling();
     hideSyncButton();
     hideBanner();
-}
 
 function onGenerationStopped() {
     log('Generation stopped by user.');
@@ -274,6 +280,7 @@ function stopPolling() {
 function onRecoverySuccess() {
     isGenerating = false;
     recovering = false;
+    awaitingRecovery = false;
     stopPolling();
     hideBanner();
     hideSyncButton();
@@ -289,6 +296,7 @@ function onRecoveryFailed() {
     // The manual sync button is always available for an on-demand retry.
     isGenerating = false;
     recovering = false;
+    awaitingRecovery = false;
     hideBanner();
     hideSyncButton(); // hide spinning state
     showSyncButton(false); // show idle state for manual retry
@@ -313,6 +321,10 @@ async function onVisibilityChange() {
     if (!getSettings().enabled) return;
     if (!isGenerating) return;
 
+    // Set this BEFORE the sleep so onGenerationEnded (which may fire during the sleep
+    // as iOS resumes suspended async work) does not clear isGenerating underneath us.
+    awaitingRecovery = true;
+
     log('Page became visible during generation — scheduling recovery...');
     toastr.info('Checking for missed response…', 'Stream Lazarus', { timeOut: 2500 });
 
@@ -320,7 +332,11 @@ async function onVisibilityChange() {
     // Brief wait: lets any still-live stream settle (or fail cleanly) before we reload.
     await sleep(delay);
 
+    awaitingRecovery = false;
+
     // Re-check: normal stream may have recovered on its own during the delay
+    // (only trust this if isGenerating was cleared by CHARACTER_MESSAGE_RENDERED
+    // or GENERATION_STOPPED, NOT by GENERATION_ENDED which can fire spuriously).
     if (!isGenerating) {
         log('Stream recovered on its own during delay. No action needed.');
         return;
@@ -528,6 +544,7 @@ export function onDisable() {
     hideBanner();
     isGenerating = false;
     recovering = false;
+    awaitingRecovery = false;
 }
 
 /* ─── Entry point ─────────────────────────────────────────────── */
