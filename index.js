@@ -14,6 +14,10 @@
 
 const MODULE_NAME = 'stream_lazarus';
 const LOG_PREFIX = '[StreamLazarus]';
+/** localStorage key for persisting pending-recovery state across full page reloads */
+const STORAGE_KEY = 'sl_pending_recovery';
+/** Max age (ms) before a persisted pending state is considered stale */
+const PENDING_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes
 
 /* ─── Default settings ────────────────────────────────────────── */
 
@@ -68,6 +72,91 @@ function saveSettings() {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
+/* ─── localStorage persistence (survives full page kill/reload) ───
+ *
+ * When iOS kills the tab entirely (not just suspends it), all JS state is wiped.
+ * We persist the "generation in progress" flag to localStorage so that when ST
+ * reloads and fires CHAT_CHANGED, we can re-arm isGenerating and attempt recovery.
+ */
+
+function persistPending() {
+    const context = SillyTavern.getContext();
+    const chatId = context.getCurrentChatId?.();
+    if (!chatId) return;
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            chatId,
+            chatLengthAtStart,
+            timestamp: Date.now(),
+        }));
+        log('Pending recovery persisted for chat:', chatId);
+    } catch (e) {
+        console.warn(LOG_PREFIX, 'Could not persist pending state:', e);
+    }
+}
+
+function clearPending() {
+    localStorage.removeItem(STORAGE_KEY);
+    log('Pending recovery cleared.');
+}
+
+/**
+ * Called on every CHAT_CHANGED (including the initial auto-load on page reload).
+ * If localStorage has a pending recovery for this chat and the last message is still
+ * from the user (AI never responded), re-arms isGenerating and triggers recovery.
+ */
+function checkPendingOnChatLoad() {
+    if (!getSettings().enabled) return;
+
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return;
+
+    let pending;
+    try {
+        pending = JSON.parse(stored);
+    } catch {
+        clearPending();
+        return;
+    }
+
+    const context = SillyTavern.getContext();
+    const currentChatId = context.getCurrentChatId?.();
+
+    if (!currentChatId || pending.chatId !== currentChatId) {
+        log('Pending recovery is for a different chat — skipping.');
+        return; // Don't clear: user may return to the original chat
+    }
+
+    if (Date.now() - pending.timestamp > PENDING_EXPIRY_MS) {
+        log('Pending recovery expired (> 30 min) — discarding.');
+        clearPending();
+        return;
+    }
+
+    // If the last message is already an AI reply, the backend finished and
+    // ST auto-loaded it. Nothing to do.
+    const chat = context.chat;
+    if (!Array.isArray(chat) || chat.length === 0) return;
+    const lastMessage = chat[chat.length - 1];
+    if (lastMessage && !lastMessage.is_user) {
+        log('Chat reloaded with AI response already present — clearing pending.');
+        clearPending();
+        return;
+    }
+
+    // Last message is from the user — AI never responded. Arm recovery.
+    log('Page reloaded mid-generation. Re-arming recovery for chat:', currentChatId);
+    chatLengthAtStart = pending.chatLengthAtStart;
+    isGenerating = true;
+
+    // Short delay: let ST finish rendering the chat before we trigger a reload.
+    setTimeout(async () => {
+        if (!isGenerating) return;
+        toastr.info('Checking for missed response…', 'Stream Lazarus', { timeOut: 3000 });
+        await attemptRecovery();
+    }, 1500);
+}
+
 /* ─── Generation state tracking ──────────────────────────────────
  *
  * Normal flow:
@@ -90,6 +179,8 @@ function onMessageSent() {
     isGenerating = true;
     chatLengthAtStart = context.chat?.length ?? 0;
     log('User message sent — recovery armed. Chat length:', chatLengthAtStart);
+    // Persist to localStorage so recovery survives a full iOS page kill/reload.
+    persistPending();
 }
 
 function onGenerationStarted(type, _params, isDryRun) {
@@ -119,6 +210,7 @@ function onGenerationEnded() {
         if (isGenerating) {
             log('Generation ended while page visible — clearing armed flag.');
             isGenerating = false;
+            clearPending();
         }
         stopPolling();
     }
@@ -133,6 +225,7 @@ function onGenerationComplete() {
     isGenerating = false;
     recovering = false;
     awaitingRecovery = false;
+    clearPending();
     stopPolling();
     hideSyncButton();
     hideBanner();
@@ -141,6 +234,7 @@ function onGenerationComplete() {
 function onGenerationStopped() {
     log('Generation stopped by user.');
     isGenerating = false;
+    clearPending();
     stopPolling();
     hideSyncButton();
     hideBanner();
@@ -149,10 +243,14 @@ function onGenerationStopped() {
 function onChatChanged() {
     log('Chat changed — resetting state.');
     isGenerating = false;
+    awaitingRecovery = false;
+    recovering = false;
     stopPolling();
     hideSyncButton();
     hideBanner();
-    recovering = false;
+    // Check localStorage: if this is the chat we were generating in (either a
+    // page-reload auto-load or the user navigating back), re-arm recovery.
+    checkPendingOnChatLoad();
 }
 
 /* ─── Recovery logic ──────────────────────────────────────────── */
@@ -282,6 +380,7 @@ function onRecoverySuccess() {
     isGenerating = false;
     recovering = false;
     awaitingRecovery = false;
+    clearPending();
     stopPolling();
     hideBanner();
     hideSyncButton();
@@ -298,6 +397,7 @@ function onRecoveryFailed() {
     isGenerating = false;
     recovering = false;
     awaitingRecovery = false;
+    clearPending();
     hideBanner();
     hideSyncButton(); // hide spinning state
     showSyncButton(false); // show idle state for manual retry
