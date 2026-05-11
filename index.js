@@ -57,6 +57,8 @@ let pageWasHiddenDuringGeneration = false;
 let isReloading = false;
 /** True if the Stream Lazarus server plugin is detected and active. */
 let pluginInstalled = false;
+/** Human-readable reason for the last plugin detection result. */
+let pluginStatusReason = 'Not yet checked';
 /** Saved reference to window.fetch before our interceptor replaces it; null when not active. */
 let originalFetch = null;
 /** Whether our generate-fetch interceptor is currently installed. */
@@ -125,20 +127,49 @@ function clearPending() {
  */
 
 async function checkPlugin() {
+    // getRequestHeaders() may not exist in all ST versions — fall back to no custom headers.
+    let extraHeaders = {};
     try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.getRequestHeaders === 'function') {
+            extraHeaders = ctx.getRequestHeaders() ?? {};
+        }
+    } catch (e) {
+        console.warn(LOG_PREFIX, 'getRequestHeaders() failed (non-fatal):', e.message);
+    }
+
+    try {
+        console.debug(LOG_PREFIX, 'Checking plugin health at /api/plugins/stream-lazarus/health …');
         const resp = await fetch('/api/plugins/stream-lazarus/health', {
-            headers: SillyTavern.getContext().getRequestHeaders(),
+            credentials: 'include',
+            headers: extraHeaders,
         });
+        console.debug(LOG_PREFIX, 'Health response status:', resp.status);
         if (resp.ok) {
             const data = await resp.json();
+            console.debug(LOG_PREFIX, 'Health response body:', data);
             pluginInstalled = data.ok === true;
+            pluginStatusReason = pluginInstalled
+                ? `v${data.version || '?'} active`
+                : `unexpected response: ${JSON.stringify(data)}`;
+        } else if (resp.status === 404) {
+            pluginInstalled = false;
+            pluginStatusReason = 'Route not found (404) — plugin may not be loaded. Check ST log and enableServerPlugins in config.yaml';
+        } else if (resp.status === 401 || resp.status === 403) {
+            pluginInstalled = false;
+            pluginStatusReason = `Auth error (${resp.status}) — ST may require login`;
         } else {
             pluginInstalled = false;
+            const body = await resp.text().catch(() => '');
+            pluginStatusReason = `Server returned HTTP ${resp.status}${body ? ': ' + body.slice(0, 120) : ''}`;
         }
-    } catch {
+    } catch (e) {
         pluginInstalled = false;
+        pluginStatusReason = `Fetch failed: ${e.message}`;
+        console.error(LOG_PREFIX, 'Plugin health check threw:', e);
     }
-    log('Server plugin installed:', pluginInstalled);
+
+    console.log(LOG_PREFIX, 'Plugin check result:', pluginInstalled ? 'INSTALLED ✓' : 'NOT INSTALLED ✗', '—', pluginStatusReason);
     return pluginInstalled;
 }
 
@@ -156,7 +187,7 @@ function installFetchInterceptor() {
             const newHeaders = new Headers(options.headers);
             if (chatId) newHeaders.set('X-SL-Chat-Id', chatId);
             log('Routing', backend, 'generate via plugin proxy.');
-            return originalFetch(newUrl, { ...options, headers: newHeaders });
+            return originalFetch(newUrl, { ...options, headers: newHeaders, credentials: 'include' });
         }
         return originalFetch(url, options);
     };
@@ -183,7 +214,7 @@ async function checkPluginResult(chatId) {
     try {
         const resp = await fetch(
             `/api/plugins/stream-lazarus/result/${encodeURIComponent(chatId)}`,
-            { headers: SillyTavern.getContext().getRequestHeaders() },
+            { credentials: 'include', headers: SillyTavern.getContext().getRequestHeaders?.() ?? {} },
         );
         if (!resp.ok) return null;
         const data = await resp.json();
@@ -203,7 +234,7 @@ async function clearPluginResult(chatId) {
     try {
         await fetch(
             `/api/plugins/stream-lazarus/result/${encodeURIComponent(chatId)}`,
-            { method: 'DELETE', headers: SillyTavern.getContext().getRequestHeaders() },
+            { method: 'DELETE', credentials: 'include', headers: SillyTavern.getContext().getRequestHeaders?.() ?? {} },
         );
     } catch { /* best-effort */ }
 }
@@ -293,11 +324,37 @@ function updatePluginStatus() {
     const el = document.getElementById('sl_plugin_status');
     if (!el) return;
     if (pluginInstalled) {
-        el.textContent = '\u2713 Active';
+        el.textContent = `\u2713 ${pluginStatusReason}`;
         el.className = 'sl-plugin-status sl-plugin-ok';
+        el.title = '';
     } else {
-        el.textContent = '\u2717 Not installed';
+        el.textContent = '\u2717 Not loaded';
+        el.title = pluginStatusReason; // hover for detail
         el.className = 'sl-plugin-status sl-plugin-missing';
+        // Also show the reason as a small line beneath the badge.
+        let reasonEl = document.getElementById('sl_plugin_reason');
+        if (!reasonEl) {
+            reasonEl = document.createElement('small');
+            reasonEl.id = 'sl_plugin_reason';
+            reasonEl.className = 'sl-hint sl-plugin-reason-text';
+            el.parentElement?.insertAdjacentElement('afterend', reasonEl);
+        }
+        reasonEl.textContent = pluginStatusReason;
+    }
+}
+
+async function recheckPlugin() {
+    const el = document.getElementById('sl_plugin_status');
+    const btn = document.getElementById('sl_plugin_recheck');
+    if (el) { el.textContent = '\u29d7 Checking\u2026'; el.className = 'sl-plugin-status'; }
+    if (btn) btn.disabled = true;
+    const had = pluginInstalled;
+    const hasPlugin = await checkPlugin();
+    updatePluginStatus();
+    if (btn) btn.disabled = false;
+    if (!had && hasPlugin) {
+        installFetchInterceptor();
+        toastr.success('Server plugin detected!', 'Stream Lazarus', { timeOut: 3000 });
     }
 }
 
@@ -746,6 +803,9 @@ async function renderSettingsPanel() {
 function bindSettingsControls() {
     const settings = getSettings();
     updatePluginStatus();
+
+    /* Plugin re-check button */
+    document.getElementById('sl_plugin_recheck')?.addEventListener('click', () => void recheckPlugin());
 
     /* Enabled toggle */
     $('#sl_enabled')

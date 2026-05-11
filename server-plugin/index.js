@@ -143,6 +143,8 @@ async function proxyGenerate(req, res, backend, chatId) {
 
     // Build forwarded headers — strip hop-by-hop and our custom SL headers,
     // then correct Host and Content-Length for the re-serialised body.
+    // We preserve the Authorization header so ST's own auth middleware (and
+    // Nginx passthrough auth) is satisfied on the loopback connection.
     const forwardHeaders = {};
     for (const [k, v] of Object.entries(req.headers)) {
         const lk = k.toLowerCase();

@@ -186,6 +186,28 @@
     margin-bottom: 4px;
 }
 
+.sl-recheck-btn {
+    margin-left: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--SmartThemeBodyColor, #ccc);
+    opacity: 0.6;
+    padding: 2px 4px;
+    font-size: 0.85em;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.sl-recheck-btn:hover { opacity: 1; }
+.sl-recheck-btn:disabled { opacity: 0.3; cursor: wait; }
+
+.sl-plugin-reason-text {
+    display: block;
+    margin-top: 3px;
+    color: #ff9800;
+}
+
 .sl-plugin-status {
     font-size: 0.72rem;
     padding: 2px 7px;
