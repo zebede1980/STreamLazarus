@@ -958,6 +958,10 @@ export function onDisable() {
         if (hasPlugin) {
             installFetchInterceptor();
         }
+        // Update the badge now that the async check has resolved — the settings
+        // panel was rendered (and bindSettingsControls ran) before checkPlugin()
+        // finished, so the badge showed the initial false state.
+        updatePluginStatus();
 
         log('Ready. Enabled:', getSettings().enabled, '| Plugin:', pluginInstalled);
     });
