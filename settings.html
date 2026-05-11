@@ -1,0 +1,81 @@
+<div class="stream-lazarus-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Stream Lazarus</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <!-- Enable / Disable -->
+            <div class="flex-container alignitemscenter">
+                <label class="checkbox_label" for="sl_enabled">
+                    <input type="checkbox" id="sl_enabled" />
+                    <span>Enable Stream Lazarus</span>
+                </label>
+            </div>
+            <small class="sl-hint">
+                Detects when your mobile browser drops the AI stream and automatically recovers the response.
+            </small>
+
+            <hr />
+
+            <!-- Recovery delay -->
+            <div class="sl-row">
+                <div class="sl-label-row">
+                    <label for="sl_recovery_delay">Initial Recovery Delay</label>
+                    <span id="sl_recovery_delay_value" class="sl-value-badge"></span>
+                </div>
+                <input type="range" id="sl_recovery_delay" min="500" max="5000" step="100" />
+                <small class="sl-hint">
+                    How long to wait after the page wakes up before reloading. Allows any broken stream to settle gracefully.
+                </small>
+            </div>
+
+            <hr />
+
+            <!-- Polling -->
+            <div class="flex-container alignitemscenter">
+                <label class="checkbox_label" for="sl_polling_enabled">
+                    <input type="checkbox" id="sl_polling_enabled" />
+                    <span>Enable polling fallback</span>
+                </label>
+            </div>
+            <small class="sl-hint">
+                If the backend is still generating when you return, keep re-checking until the response arrives.
+                Works best with cloud APIs (Claude, OpenAI, etc.) that continue generating on the server.
+            </small>
+
+            <div class="sl-polling-options">
+                <div class="sl-row">
+                    <div class="sl-label-row">
+                        <label for="sl_polling_interval">Polling Interval</label>
+                        <span id="sl_polling_interval_value" class="sl-value-badge"></span>
+                    </div>
+                    <input type="range" id="sl_polling_interval" min="5" max="60" step="5" />
+                    <small class="sl-hint">How often to re-check the server for a completed response.</small>
+                </div>
+
+                <div class="sl-row">
+                    <div class="sl-label-row">
+                        <label for="sl_max_polling_attempts">Max Polling Attempts</label>
+                        <span id="sl_max_polling_attempts_value" class="sl-value-badge"></span>
+                    </div>
+                    <input type="range" id="sl_max_polling_attempts" min="2" max="24" step="1" />
+                    <small class="sl-hint">Stop polling after this many attempts. Total wait = interval × attempts.</small>
+                </div>
+            </div>
+
+            <hr />
+
+            <div class="sl-tip-box">
+                <i class="fa-solid fa-lightbulb"></i>
+                <div>
+                    <strong>Tip:</strong> Also install the official <em>Silence Player</em> extension.
+                    It plays a silent audio loop that helps keep the browser tab alive in the background —
+                    reducing how often recovery is needed in the first place.
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
