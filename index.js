@@ -136,6 +136,7 @@ function onGenerationComplete() {
     stopPolling();
     hideSyncButton();
     hideBanner();
+}
 
 function onGenerationStopped() {
     log('Generation stopped by user.');
