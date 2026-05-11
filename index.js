@@ -55,6 +55,12 @@ let pageWasHiddenDuringGeneration = false;
  *  CHARACTER_MESSAGE_RENDERED event (fired by ST when re-rendering messages) from
  *  being mistaken for a natural generation completion and clearing our state early. */
 let isReloading = false;
+/** True if the Stream Lazarus server plugin is detected and active. */
+let pluginInstalled = false;
+/** Saved reference to window.fetch before our interceptor replaces it; null when not active. */
+let originalFetch = null;
+/** Whether our generate-fetch interceptor is currently installed. */
+let fetchInterceptorInstalled = false;
 
 /* ─── Settings helpers ────────────────────────────────────────── */
 
@@ -103,12 +109,204 @@ function clearPending() {
     log('Pending recovery cleared.');
 }
 
+/* ─── Server plugin integration ──────────────────────────────────
+ *
+ * If the Stream Lazarus server plugin is installed in ST's plugins/ directory,
+ * this extension intercepts AI generate fetch() calls and routes them through
+ * the plugin's proxy endpoint.  The plugin keeps the upstream API call alive
+ * even when iOS drops the TCP connection, buffers the SSE, and stores the
+ * generated text so it can be retrieved when the user returns to the page.
+ *
+ * Plugin routes (all relative to /api/plugins/stream-lazarus/):
+ *   GET  /health              — liveness check
+ *   POST /generate?backend=X  — proxy generate (the main hook)
+ *   GET  /result/:chatId      — retrieve & clear stored result
+ *   DELETE /result/:chatId    — explicitly clear stored result
+ */
+
+async function checkPlugin() {
+    try {
+        const resp = await fetch('/api/plugins/stream-lazarus/health', {
+            headers: SillyTavern.getContext().getRequestHeaders(),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            pluginInstalled = data.ok === true;
+        } else {
+            pluginInstalled = false;
+        }
+    } catch {
+        pluginInstalled = false;
+    }
+    log('Server plugin installed:', pluginInstalled);
+    return pluginInstalled;
+}
+
+function installFetchInterceptor() {
+    if (fetchInterceptorInstalled) return;
+    originalFetch = window.fetch.bind(window);
+    window.fetch = function slGenerateProxy(url, options = {}) {
+        const urlStr = typeof url === 'string' ? url : (url instanceof URL ? url.href : String(url));
+        // Match /api/backends/{backend}/generate with optional query string.
+        const match = urlStr.match(/\/api\/backends\/([^/?]+)\/generate(\?|$)/);
+        if (match && getSettings().enabled) {
+            const backend = match[1];
+            const chatId  = SillyTavern.getContext().getCurrentChatId?.() ?? '';
+            const newUrl  = `/api/plugins/stream-lazarus/generate?backend=${encodeURIComponent(backend)}`;
+            const newHeaders = new Headers(options.headers);
+            if (chatId) newHeaders.set('X-SL-Chat-Id', chatId);
+            log('Routing', backend, 'generate via plugin proxy.');
+            return originalFetch(newUrl, { ...options, headers: newHeaders });
+        }
+        return originalFetch(url, options);
+    };
+    fetchInterceptorInstalled = true;
+    log('Fetch interceptor installed.');
+}
+
+function removeFetchInterceptor() {
+    if (!fetchInterceptorInstalled || !originalFetch) return;
+    window.fetch = originalFetch;
+    originalFetch = null;
+    fetchInterceptorInstalled = false;
+    log('Fetch interceptor removed.');
+}
+
+/**
+ * Check the plugin's result endpoint for a saved generation.
+ * Returns the saved text string, or null if nothing is stored.
+ * @param {string|null} chatId
+ * @returns {Promise<string|null>}
+ */
+async function checkPluginResult(chatId) {
+    if (!pluginInstalled || !chatId) return null;
+    try {
+        const resp = await fetch(
+            `/api/plugins/stream-lazarus/result/${encodeURIComponent(chatId)}`,
+            { headers: SillyTavern.getContext().getRequestHeaders() },
+        );
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return data.found ? String(data.text) : null;
+    } catch (e) {
+        log('Plugin result check failed:', e.message);
+        return null;
+    }
+}
+
+/**
+ * Explicitly clear a stored plugin result (called when normal recovery succeeds).
+ * @param {string|null} chatId
+ */
+async function clearPluginResult(chatId) {
+    if (!pluginInstalled || !chatId) return;
+    try {
+        await fetch(
+            `/api/plugins/stream-lazarus/result/${encodeURIComponent(chatId)}`,
+            { method: 'DELETE', headers: SillyTavern.getContext().getRequestHeaders() },
+        );
+    } catch { /* best-effort */ }
+}
+
+/**
+ * After polling fails: check the plugin for a saved result.
+ * Shows a recovery modal if found; otherwise shows the standard failure toastr.
+ */
+async function checkPluginResultAndNotify() {
+    const chatId    = SillyTavern.getContext().getCurrentChatId?.() ?? null;
+    const savedText = pluginInstalled ? await checkPluginResult(chatId) : null;
+
+    if (savedText) {
+        log('Plugin result found — showing recovery modal.');
+        showRecoveredTextModal(savedText);
+        toastr.success('Response recovered via server plugin!', 'Stream Lazarus', { timeOut: 4000 });
+    } else {
+        const settings      = getSettings();
+        const totalWaitSec  = settings.pollingEnabled
+            ? settings.pollingIntervalSec * settings.maxPollingAttempts
+            : Math.round(settings.recoveryDelay / 1000);
+        toastr.warning(
+            `No response found after ${totalWaitSec}s. Tap the sync button to try again.`,
+            'Stream Lazarus',
+            { timeOut: 6000 },
+        );
+        log('Recovery failed — manual sync available.');
+    }
+}
+
+/**
+ * Show a modal containing the AI response text recovered by the server plugin.
+ * @param {string} text
+ */
+function showRecoveredTextModal(text) {
+    document.getElementById('sl-recovery-modal')?.remove();
+
+    // Basic HTML-escape to prevent injection from model output.
+    const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+
+    const modal = document.createElement('div');
+    modal.id = 'sl-recovery-modal';
+    modal.innerHTML = `
+        <div class="sl-modal-backdrop" id="sl-modal-backdrop">
+            <div class="sl-modal-box">
+                <div class="sl-modal-header">
+                    <i class="fa-solid fa-rotate-right"></i>
+                    <span>Response Recovered</span>
+                </div>
+                <p class="sl-modal-hint">
+                    The AI finished generating after your connection dropped.
+                    The chat was not auto-saved — here is the response:
+                </p>
+                <div class="sl-modal-body">${escaped}</div>
+                <div class="sl-modal-footer">
+                    <button class="sl-modal-btn sl-modal-copy" id="sl-modal-copy-btn">
+                        <i class="fa-solid fa-copy"></i> Copy
+                    </button>
+                    <button class="sl-modal-btn sl-modal-close" id="sl-modal-close-btn">
+                        Dismiss
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    document.getElementById('sl-modal-copy-btn')?.addEventListener('click', () => {
+        navigator.clipboard.writeText(text).then(
+            () => toastr.success('Copied to clipboard.', 'Stream Lazarus', { timeOut: 2000 }),
+            () => toastr.error('Could not access clipboard.', 'Stream Lazarus', { timeOut: 2000 }),
+        );
+    });
+
+    const closeModal = () => modal.remove();
+    document.getElementById('sl-modal-close-btn')?.addEventListener('click', closeModal);
+    document.getElementById('sl-modal-backdrop')?.addEventListener('click', (e) => {
+        if (e.target.id === 'sl-modal-backdrop') closeModal();
+    });
+}
+
+/** Update the plugin status badge in the settings panel (if rendered). */
+function updatePluginStatus() {
+    const el = document.getElementById('sl_plugin_status');
+    if (!el) return;
+    if (pluginInstalled) {
+        el.textContent = '\u2713 Active';
+        el.className = 'sl-plugin-status sl-plugin-ok';
+    } else {
+        el.textContent = '\u2717 Not installed';
+        el.className = 'sl-plugin-status sl-plugin-missing';
+    }
+}
+
 /**
  * Called on every CHAT_CHANGED (including the initial auto-load on page reload).
  * If localStorage has a pending recovery for this chat and the last message is still
  * from the user (AI never responded), re-arms isGenerating and triggers recovery.
  */
-function checkPendingOnChatLoad() {
+async function checkPendingOnChatLoad() {
     if (!getSettings().enabled) return;
 
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -145,6 +343,19 @@ function checkPendingOnChatLoad() {
         log('Chat reloaded with AI response already present — clearing pending.');
         clearPending();
         return;
+    }
+
+    // If the server plugin has a saved result for this chat, show it immediately
+    // without going through the full polling cycle.
+    if (pluginInstalled) {
+        const savedText = await checkPluginResult(currentChatId);
+        if (savedText) {
+            log('Plugin has saved result for chat', currentChatId, '— showing modal.');
+            clearPending();
+            showRecoveredTextModal(savedText);
+            toastr.success('Response recovered via server plugin!', 'Stream Lazarus', { timeOut: 4000 });
+            return;
+        }
     }
 
     // Last message is from the user — AI never responded. Arm recovery.
@@ -200,6 +411,8 @@ function onGenerationStarted(type, _params, isDryRun) {
     isGenerating = true;
     chatLengthAtStart = context.chat?.length ?? 0;
     log('Generation started (refined). Chat length:', chatLengthAtStart);
+    // Re-persist with the refined chatLengthAtStart so localStorage stays accurate.
+    persistPending();
 }
 
 function onGenerationEnded() {
@@ -391,6 +604,11 @@ function onRecoverySuccess() {
     SillyTavern.getContext().scrollChatToBottom();
     toastr.success('Response recovered!', 'Stream Lazarus', { timeOut: 3000 });
     log('Recovery successful.');
+    // Clear any plugin-stored result that was superseded by the normal chat save.
+    if (pluginInstalled) {
+        const chatId = SillyTavern.getContext().getCurrentChatId?.();
+        void clearPluginResult(chatId);
+    }
 }
 
 function onRecoveryFailed() {
@@ -405,18 +623,8 @@ function onRecoveryFailed() {
     hideBanner();
     hideSyncButton(); // hide spinning state
     showSyncButton(false); // show idle state for manual retry
-
-    const settings = getSettings();
-    const totalWaitSec = settings.pollingEnabled
-        ? settings.pollingIntervalSec * settings.maxPollingAttempts
-        : Math.round(settings.recoveryDelay / 1000);
-
-    toastr.warning(
-        `No response found after ${totalWaitSec}s. Tap the sync button to try again.`,
-        'Stream Lazarus',
-        { timeOut: 6000 },
-    );
-    log('Recovery failed — manual sync available.');
+    // Defer the failure notification: check plugin for a saved result first.
+    void checkPluginResultAndNotify();
 }
 
 /* ─── Page visibility handler ─────────────────────────────────── */
@@ -537,6 +745,7 @@ async function renderSettingsPanel() {
 
 function bindSettingsControls() {
     const settings = getSettings();
+    updatePluginStatus();
 
     /* Enabled toggle */
     $('#sl_enabled')
@@ -649,6 +858,7 @@ export function onActivate() {
 
 export function onDisable() {
     log('Extension disabled — cleaning up.');
+    removeFetchInterceptor();
     unregisterEvents();
     document.removeEventListener('visibilitychange', onVisibilityChange);
     stopPolling();
@@ -656,7 +866,7 @@ export function onDisable() {
     hideBanner();
     isGenerating = false;
     recovering = false;
-    awaitingRecovery = false;
+    pageWasHiddenDuringGeneration = false;
 }
 
 /* ─── Entry point ─────────────────────────────────────────────── */
@@ -683,7 +893,13 @@ export function onDisable() {
         createSyncButton();
         createBanner();
 
-        log('Ready. Enabled:', getSettings().enabled);
+        // Detect server plugin and install the generate-fetch interceptor if present.
+        const hasPlugin = await checkPlugin();
+        if (hasPlugin) {
+            installFetchInterceptor();
+        }
+
+        log('Ready. Enabled:', getSettings().enabled, '| Plugin:', pluginInstalled);
     });
 })();
 

@@ -76,6 +76,27 @@
                 </div>
             </div>
 
+            <hr />
+
+            <!-- Server Plugin Status -->
+            <div class="sl-plugin-section">
+                <div class="sl-plugin-header">
+                    <i class="fa-solid fa-plug"></i>
+                    <strong>Server Plugin</strong>
+                    <span id="sl_plugin_status" class="sl-plugin-status sl-plugin-missing">Checking…</span>
+                </div>
+                <small class="sl-hint">
+                    The server plugin routes generate calls through a local proxy that keeps the upstream
+                    API call alive even when iOS drops the TCP connection — the only way to recover responses
+                    after a full tab kill.
+                </small>
+                <small class="sl-hint">
+                    <strong>To install:</strong> copy the <code>server-plugin/</code> folder from this
+                    extension into SillyTavern's <code>plugins/stream-lazarus/</code> directory,
+                    set <code>enableServerPlugins: true</code> in <code>config.yaml</code>, then restart ST.
+                </small>
+            </div>
+
         </div>
     </div>
 </div>
