@@ -44,10 +44,13 @@ let pollTimer = null;
 let pollAttempts = 0;
 /** Whether a recovery cycle is currently running (prevents overlapping cycles) */
 let recovering = false;
-/** Set as soon as visibilitychange decides recovery is needed, before the sleep delay.
- *  Prevents onGenerationEnded from clearing isGenerating during the recovery window
- *  when iOS resumes deferred async work (stream error handlers, etc.) after unsuspending. */
-let awaitingRecovery = false;
+/** Set when visibilitychange→hidden fires while isGenerating is true.
+ *  This is set BEFORE iOS freezes JS, so when the page resumes and deferred
+ *  callbacks fire (e.g. ST's stream error handler → GENERATION_ENDED), we can
+ *  tell onGenerationEnded not to clear isGenerating underneath the recovery logic.
+ *  This is more reliable than awaitingRecovery (which was set too late, inside
+ *  the visible handler, after deferred work had already run). */
+let pageWasHiddenDuringGeneration = false;
 /** True while we are inside our own reloadCurrentChat() call — prevents the
  *  CHARACTER_MESSAGE_RENDERED event (fired by ST when re-rendering messages) from
  *  being mistaken for a natural generation completion and clearing our state early. */
@@ -206,7 +209,7 @@ function onGenerationEnded() {
     // just returned to the page and iOS is resuming deferred async work (the stream
     // reader error handler from when the connection was killed). Clearing here would
     // cause onVisibilityChange to think the stream recovered on its own and bail out.
-    if (document.visibilityState === 'visible' && !awaitingRecovery && !recovering) {
+    if (document.visibilityState === 'visible' && !pageWasHiddenDuringGeneration && !recovering) {
         if (isGenerating) {
             log('Generation ended while page visible — clearing armed flag.');
             isGenerating = false;
@@ -224,7 +227,7 @@ function onGenerationComplete() {
     log('Generation completed normally — no recovery needed.');
     isGenerating = false;
     recovering = false;
-    awaitingRecovery = false;
+    pageWasHiddenDuringGeneration = false;
     clearPending();
     stopPolling();
     hideSyncButton();
@@ -234,6 +237,7 @@ function onGenerationComplete() {
 function onGenerationStopped() {
     log('Generation stopped by user.');
     isGenerating = false;
+    pageWasHiddenDuringGeneration = false;
     clearPending();
     stopPolling();
     hideSyncButton();
@@ -243,7 +247,7 @@ function onGenerationStopped() {
 function onChatChanged() {
     log('Chat changed — resetting state.');
     isGenerating = false;
-    awaitingRecovery = false;
+    pageWasHiddenDuringGeneration = false;
     recovering = false;
     stopPolling();
     hideSyncButton();
@@ -379,7 +383,7 @@ function stopPolling() {
 function onRecoverySuccess() {
     isGenerating = false;
     recovering = false;
-    awaitingRecovery = false;
+    pageWasHiddenDuringGeneration = false;
     clearPending();
     stopPolling();
     hideBanner();
@@ -396,7 +400,7 @@ function onRecoveryFailed() {
     // The manual sync button is always available for an on-demand retry.
     isGenerating = false;
     recovering = false;
-    awaitingRecovery = false;
+    pageWasHiddenDuringGeneration = false;
     clearPending();
     hideBanner();
     hideSyncButton(); // hide spinning state
@@ -418,13 +422,21 @@ function onRecoveryFailed() {
 /* ─── Page visibility handler ─────────────────────────────────── */
 
 async function onVisibilityChange() {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState === 'hidden') {
+        // Page going into background. If a generation is in progress, arm the flag NOW
+        // (before JS is frozen by iOS) so that when we resume and deferred async work
+        // fires (ST's stream error handler, GENERATION_ENDED, etc.), onGenerationEnded
+        // sees pageWasHiddenDuringGeneration=true and does not clear isGenerating.
+        if (isGenerating) {
+            pageWasHiddenDuringGeneration = true;
+            log('Page hidden during generation — protection flag armed.');
+        }
+        return;
+    }
+
+    // Page became visible.
     if (!getSettings().enabled) return;
     if (!isGenerating) return;
-
-    // Set this BEFORE the sleep so onGenerationEnded (which may fire during the sleep
-    // as iOS resumes suspended async work) does not clear isGenerating underneath us.
-    awaitingRecovery = true;
 
     log('Page became visible during generation — scheduling recovery...');
     toastr.info('Checking for missed response…', 'Stream Lazarus', { timeOut: 2500 });
@@ -433,13 +445,12 @@ async function onVisibilityChange() {
     // Brief wait: lets any still-live stream settle (or fail cleanly) before we reload.
     await sleep(delay);
 
-    awaitingRecovery = false;
-
-    // Re-check: normal stream may have recovered on its own during the delay
-    // (only trust this if isGenerating was cleared by CHARACTER_MESSAGE_RENDERED
-    // or GENERATION_STOPPED, NOT by GENERATION_ENDED which can fire spuriously).
+    // After the delay, check again. The only way isGenerating is now false is if
+    // CHARACTER_MESSAGE_RENDERED or GENERATION_STOPPED fired (genuine success/cancel).
+    // GENERATION_ENDED alone cannot clear it thanks to pageWasHiddenDuringGeneration.
     if (!isGenerating) {
-        log('Stream recovered on its own during delay. No action needed.');
+        log('Stream genuinely recovered during delay. No action needed.');
+        pageWasHiddenDuringGeneration = false;
         return;
     }
 
