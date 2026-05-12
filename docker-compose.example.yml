@@ -31,6 +31,7 @@ services:
   # It sits between NPM and SillyTavern, keeping the upstream AI connection
   # alive after iOS drops the browser TCP connection mid-generation.
   stream-lazarus:
+    container_name: stream-lazarus
     build:
       context: https://github.com/zebede1980/STreamLazarus.git#main:proxy
     environment:
