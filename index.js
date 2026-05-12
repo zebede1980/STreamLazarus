@@ -97,19 +97,28 @@ function installFetchInterceptor() {
         const urlStr = typeof url === 'string' ? url : String(url);
         const isGenerate = /\/api\/.*\/generate\/?$/.test(urlStr);
 
-        // Let the request proceed normally — we just observe the response.
-        const response = await originalFetch(url, options);
-
         if (isGenerate && getSettings().enabled && proxyActive) {
-            // The proxy sets this header on every intercepted generate response.
-            const streamId = response.headers.get('x-sl-stream-id');
-            if (streamId) {
-                const chatId = SillyTavern.getContext().getCurrentChatId?.() ?? '';
-                savePending(chatId, streamId);
+            // Pre-generate the stream ID so we save it BEFORE the network round-trip.
+            // If the user locks their phone during prompt processing, the fetch promise
+            // might never resolve, so we must save our state immediately.
+            const streamId = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
+            
+            options = options || {};
+            options.headers = options.headers || {};
+            if (options.headers instanceof Headers) {
+                options.headers.set('X-SL-Stream-Id', streamId);
+            } else if (Array.isArray(options.headers)) {
+                options.headers.push(['X-SL-Stream-Id', streamId]);
+            } else {
+                options.headers['X-SL-Stream-Id'] = streamId;
             }
+
+            const chatId = SillyTavern.getContext().getCurrentChatId?.() ?? '';
+            savePending(chatId, streamId);
         }
 
-        return response;
+        // Let the request proceed normally
+        return await originalFetch(url, options);
     };
     fetchInterceptorActive = true;
     log('Fetch interceptor installed.');
@@ -217,17 +226,24 @@ async function directReloadFallback() {
 
 /* ─── Visibility handler ──────────────────────────────────────── */
 
+let visibilityCheckTimeout = null;
+
 async function onVisibilityChange() {
     if (document.visibilityState !== 'visible') return;
     if (!getSettings().enabled) return;
     if (recovering) return;
 
-    const pending = loadPending();
-    if (!pending) return;
+    // Debounce to prevent multiple triggers from focus/pageshow/visibilitychange firing together
+    // and give TouchID/FaceID unlock animations a moment to settle.
+    if (visibilityCheckTimeout) clearTimeout(visibilityCheckTimeout);
+    visibilityCheckTimeout = setTimeout(async () => {
+        const pending = loadPending();
+        if (!pending) return;
 
-    log('Page visible — pending recovery present, starting…');
-    toastr.info('Checking for response\u2026', 'Stream Lazarus', { timeOut: 2000 });
-    await attemptRecovery();
+        log('Page visible — pending recovery present, starting…');
+        toastr.info('Checking for response\u2026', 'Stream Lazarus', { timeOut: 2000 });
+        await attemptRecovery();
+    }, 600);
 }
 
 /* ─── ST event handlers ───────────────────────────────────────── */
@@ -364,6 +380,8 @@ export function onDisable() {
     removeFetchInterceptor();
     unregisterEvents();
     document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('focus', onVisibilityChange);
+    window.removeEventListener('pageshow', onVisibilityChange);
     hideBanner();
     recovering = false;
 }
@@ -378,6 +396,8 @@ export function onDisable() {
         await renderSettingsPanel();
         registerEvents();
         document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('focus', onVisibilityChange);
+        window.addEventListener('pageshow', onVisibilityChange);
         createBanner();
         const active = await checkProxy();
         if (active) installFetchInterceptor();

@@ -133,7 +133,8 @@ app.post(
     /^\/api\/.*\/generate\/?$/,
     express.raw({ type: '*/*', limit: '50mb' }),
     (req, res) => {
-        const streamId = crypto.randomUUID();
+        // Prefer the client-provided stream ID (so it doesn't matter if iOS drops the connection before headers)
+        const streamId = req.headers['x-sl-stream-id'] || crypto.randomUUID();
 
         /** @type {StreamEntry} */
         const entry = {
