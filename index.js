@@ -432,7 +432,15 @@ function showRecoveryModal(text) {
                 if (!lastMsg || lastMsg.is_user) {
                     // The connection dropped before the AI's empty message shell was created.
                     // We must push a new message object.
-                    const charName = ctx.characters?.[ctx.characterId]?.name || 'AI';
+                    let charName = 'AI';
+                    if (ctx.characterId && ctx.characters?.[ctx.characterId]) {
+                        charName = ctx.characters[ctx.characterId].name;
+                    } else {
+                        // Fallback: copy name from the last AI message in history
+                        const lastAiMsg = [...ctx.chat].reverse().find(m => !m.is_user);
+                        if (lastAiMsg && lastAiMsg.name) charName = lastAiMsg.name;
+                    }
+
                     ctx.chat.push({
                         name: charName,
                         is_user: false,
@@ -460,7 +468,7 @@ function showRecoveryModal(text) {
                 }
                 
                 // Ask ST to save our newly patched message back to the server
-                if (typeof window.saveChat === 'function') await window.saveChat();
+                await forceSaveChat();
             }
             modal.remove();
             resolve(true);
@@ -514,6 +522,36 @@ export function onDisable() {
 })();
 
 /* ─── Utilities ───────────────────────────────────────────────── */
+
+async function forceSaveChat() {
+    const ctx = SillyTavern.getContext();
+    
+    if (typeof window.saveChat === 'function') {
+        await window.saveChat();
+        return;
+    }
+    if (typeof ctx.saveChat === 'function') {
+        await ctx.saveChat();
+        return;
+    }
+
+    const chatId = ctx.getCurrentChatId?.() ?? ctx.chatId;
+    if (!chatId) return;
+
+    try {
+        await fetch('/api/chats/save', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': window['csrf_token'] || ctx.csrfToken || '',
+            },
+            body: JSON.stringify({ chat: chatId, data: ctx.chat })
+        });
+        log('Chat saved via fallback API.');
+    } catch (e) {
+        console.error(LOG_PREFIX, 'Failed to save chat via API fallback', e);
+    }
+}
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function log(...a) { console.debug(LOG_PREFIX, ...a); }
