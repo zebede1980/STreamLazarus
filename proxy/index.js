@@ -130,8 +130,8 @@ app.delete('/_slproxy/stream/:id', (req, res) => {
  * them unchanged.
  */
 app.post(
-    '/api/backends/:backend/generate',
-    express.json({ limit: '10mb' }),
+    /^\/api\/.*\/generate\/?$/,
+    express.raw({ type: '*/*', limit: '50mb' }),
     (req, res) => {
         const streamId = crypto.randomUUID();
 
@@ -149,8 +149,8 @@ app.post(
         // so the client fetch interceptor can read it from the response headers.
         res.setHeader('X-SL-Stream-Id', streamId);
 
-        // Re-serialise the parsed body for the loopback request.
-        const bodyBuf = Buffer.from(JSON.stringify(req.body), 'utf8');
+        // Pass the raw body buffer downstream (supports multimodal images).
+        const bodyBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
 
         // Build forwarded headers: strip hop-by-hop and fix host/length.
         const fwd = {};
@@ -160,7 +160,6 @@ app.post(
             fwd[k] = v;
         }
         fwd['host']           = `${ST_HOST}:${ST_PORT}`;
-        fwd['content-type']   = 'application/json';
         fwd['content-length'] = String(bodyBuf.length);
 
         // Track whether the iOS client is still connected.

@@ -95,7 +95,7 @@ function installFetchInterceptor() {
     originalFetch = window.fetch.bind(window);
     window.fetch = async function slObserve(url, options) {
         const urlStr = typeof url === 'string' ? url : String(url);
-        const isGenerate = /\/api\/backends\/[^/?]+\/generate/.test(urlStr);
+        const isGenerate = /\/api\/.*\/generate\/?$/.test(urlStr);
 
         // Let the request proceed normally — we just observe the response.
         const response = await originalFetch(url, options);
@@ -390,4 +390,3 @@ export function onDisable() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function log(...a) { console.debug(LOG_PREFIX, ...a); }
-
