@@ -129,6 +129,21 @@ app.get('/_slproxy/reconnect/:id', (req, res) => {
  * @returns {string}
  */
 function parseSSEText(sseData) {
+    // If the data doesn't look like SSE, it might be raw JSON or plain text.
+    if (!sseData.includes('data: ')) {
+        try {
+            const json = JSON.parse(sseData);
+            if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content.trim();
+            if (typeof json?.choices?.[0]?.text === 'string') return json.choices[0].text.trim();
+            if (typeof json?.content?.[0]?.text === 'string') return json.content[0].text.trim();
+            if (typeof json?.candidates?.[0]?.content?.parts?.[0]?.text === 'string') return json.candidates[0].content.parts[0].text.trim();
+            if (typeof json?.reply === 'string') return json.reply.trim();
+            if (typeof json?.text === 'string') return json.text.trim();
+        } catch {
+            if (sseData.trim() && !sseData.trim().startsWith('{')) return sseData.trim();
+        }
+    }
+
     let text = '';
     for (const line of sseData.split('\n')) {
         if (!line.startsWith('data: ')) continue;
@@ -138,9 +153,12 @@ function parseSSEText(sseData) {
         let json;
         try { json = JSON.parse(data); } catch { continue; }
 
-        // OpenAI / most providers
+        // OpenAI Chat / most providers
         const oaiDelta = json?.choices?.[0]?.delta?.content;
         if (typeof oaiDelta === 'string') { text += oaiDelta; continue; }
+
+        // OpenAI Text / Ooba / TextGen
+        if (typeof json?.choices?.[0]?.text === 'string') { text += json.choices[0].text; continue; }
 
         // Claude direct API
         if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta') {
@@ -151,6 +169,9 @@ function parseSSEText(sseData) {
         // Gemini
         const geminiText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
         if (typeof geminiText === 'string') { text += geminiText; continue; }
+
+        // KoboldCpp / Horde / generic tokens
+        if (typeof json?.token === 'string') { text += json.token; continue; }
     }
     return text.trim();
 }
@@ -195,7 +216,8 @@ app.post(
         const fwd = {};
         for (const [k, v] of Object.entries(req.headers)) {
             const lk = k.toLowerCase();
-            if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'content-length') continue;
+            // Strip accept-encoding to force plain text (disables gzip/brotli compression)
+            if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'content-length' || lk === 'accept-encoding') continue;
             fwd[k] = v;
         }
         fwd['host']           = `${ST_HOST}:${ST_PORT}`;

@@ -174,13 +174,21 @@ async function attemptRecovery() {
 
                 // Provide the text back to the client to either copy or insert
                 // because ST's backend does not auto-save interrupted SSE streams.
+                let recoveredViaModal = false;
                 if (data.text) {
                     await showRecoveryModal(data.text);
+                    recoveredViaModal = true;
                 }
 
                 await ctx.reloadCurrentChat();
                 ctx.scrollChatToBottom();
-                toastr.success('Response recovered!', 'Stream Lazarus', { timeOut: 3000 });
+                
+                const last = ctx.chat?.[ctx.chat.length - 1];
+                if (recoveredViaModal || (last && !last.is_user)) {
+                    toastr.success('Response recovered!', 'Stream Lazarus', { timeOut: 3000 });
+                } else {
+                    toastr.warning('Generation ended, but no text could be extracted.', 'Stream Lazarus', { timeOut: 5000 });
+                }
                 log('Recovery complete.');
                 return;
             }
