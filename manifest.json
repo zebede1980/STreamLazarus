@@ -7,9 +7,9 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Joe",
-    "version": "1.0.0",
-    "homePage": "https://github.com/STreamLazarus",
-    "auto_update": false,
+    "version": "2.0.0",
+    "homePage": "https://github.com/zebede1980/STreamLazarus",
+    "auto_update": true,
     "minimum_client_version": "1.12.0",
     "hooks": {
         "activate": "onActivate",
