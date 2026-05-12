@@ -428,24 +428,47 @@ function showRecoveryModal(text) {
             const ctx = SillyTavern.getContext();
             if (ctx.chat) {
                 const lastMsg = ctx.chat[ctx.chat.length - 1];
-                if (lastMsg && !lastMsg.is_user) {
+                
+                if (!lastMsg || lastMsg.is_user) {
+                    // The connection dropped before the AI's empty message shell was created.
+                    // We must push a new message object.
+                    const charName = ctx.characters?.[ctx.characterId]?.name || 'AI';
+                    ctx.chat.push({
+                        name: charName,
+                        is_user: false,
+                        is_name: true,
+                        send_date: Date.now(),
+                        mes: text,
+                        swipes: [text],
+                        swipe_id: 0,
+                        extra: {}
+                    });
+                } else {
+                    // The AI message shell exists, update it.
                     lastMsg.mes = text;
-                    if (Array.isArray(lastMsg.swipes) && lastMsg.swipes.length > 0) {
-                        lastMsg.swipes[lastMsg.swipe_id || 0] = text;
+                    if (Array.isArray(lastMsg.swipes)) {
+                        if (lastMsg.swipes.length > 0) {
+                            lastMsg.swipes[lastMsg.swipe_id || 0] = text;
+                        } else {
+                            lastMsg.swipes.push(text);
+                            lastMsg.swipe_id = 0;
+                        }
+                    } else {
+                        lastMsg.swipes = [text];
+                        lastMsg.swipe_id = 0;
                     }
                 }
                 
                 // Ask ST to save our newly patched message back to the server
-                if (typeof ctx.saveChat === 'function') await ctx.saveChat();
-                else if (typeof window.saveChat === 'function') await window.saveChat();
+                if (typeof window.saveChat === 'function') await window.saveChat();
             }
             modal.remove();
-            resolve();
+            resolve(true);
         });
 
         modal.querySelector('.sl-modal-close').addEventListener('click', () => {
             modal.remove();
-            resolve();
+            resolve(false);
         });
     });
 }
