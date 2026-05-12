@@ -1,0 +1,94 @@
+# docker-compose.example.yml — Stream Lazarus v2
+#
+# This is a REFERENCE FILE showing how to integrate the stream-lazarus proxy
+# container into a typical SillyTavern + Nginx Docker stack.
+#
+# ── What to do ────────────────────────────────────────────────────────────────
+#
+#   1. Copy the `stream-lazarus` service block into your own docker-compose.yml.
+#   2. Change proxy_pass in your Nginx config from:
+#        http://sillytavern:8000
+#      to:
+#        http://stream-lazarus:3000
+#   3. Add proxy_buffering off; and proxy_read_timeout 300s; to the location
+#      block (see the nginx comment below).
+#   4. Remove any external `ports:` mapping for port 8000 on sillytavern —
+#      it no longer needs to be reachable from outside Docker.
+#   5. docker compose up -d
+#
+# ── The proxy builds directly from GitHub — no local clone needed ──────────
+#
+#   The build context is the public repository.  Docker fetches and builds
+#   it automatically on `docker compose up` or `docker compose build`.
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── SillyTavern ─────────────────────────────────────────────────────────────
+  # Your existing ST service.  Shown here for reference.
+  # KEY CHANGE: remove any `ports:` that expose 8000 externally.
+  # The proxy talks to it over the internal Docker network only.
+  sillytavern:
+    image: ghcr.io/sillytavern/sillytavern:latest
+    # ports:                  # <-- REMOVE or comment out the 8000 mapping
+    #   - "8000:8000"         #     (stream-lazarus is the new public entry point)
+    volumes:
+      - ./config:/home/node/app/config
+      - ./data:/home/node/app/data
+      # Extension is installed here — not required for the proxy to work,
+      # but included so the ST UI extension is available in the container:
+      - ./extensions/STreamLazarus:/home/node/app/public/scripts/extensions/third-party/STreamLazarus
+    restart: unless-stopped
+
+  # ── Stream Lazarus Proxy ─────────────────────────────────────────────────────
+  # Sits between Nginx and SillyTavern.  Intercepts generate calls to keep the
+  # upstream AI connection alive after iOS drops the browser TCP connection.
+  #
+  # Builds directly from the public GitHub repository — no local files needed.
+  stream-lazarus:
+    build:
+      context: https://github.com/zebede1980/STreamLazarus.git#main
+      dockerfile: proxy/Dockerfile
+    environment:
+      ST_HOST: sillytavern    # Docker service name for SillyTavern
+      ST_PORT: "8000"
+      PROXY_PORT: "3000"
+    expose:
+      - "3000"
+    depends_on:
+      - sillytavern
+    restart: unless-stopped
+
+  # ── Nginx ────────────────────────────────────────────────────────────────────
+  # Your existing Nginx service.  Shown here for reference.
+  # KEY CHANGE: proxy_pass must point to stream-lazarus:3000 not sillytavern:8000.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - stream-lazarus     # <-- was: sillytavern
+    restart: unless-stopped
+
+# ── Required Nginx location block changes ─────────────────────────────────────
+#
+# In your nginx.conf, update the proxy_pass and add SSE-friendly settings:
+#
+#   location / {
+#       proxy_pass         http://stream-lazarus:3000;   # <-- changed
+#       proxy_http_version 1.1;
+#       proxy_set_header   Host              $host;
+#       proxy_set_header   X-Real-IP         $remote_addr;
+#       proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#       proxy_set_header   X-Forwarded-Proto $scheme;
+#       proxy_set_header   Connection        '';          # <-- keep connections open
+#       proxy_buffering    off;                           # <-- required for SSE
+#       proxy_read_timeout 300s;                         # <-- long generations
+#   }
+#
+# ──────────────────────────────────────────────────────────────────────────────
