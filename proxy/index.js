@@ -61,9 +61,11 @@ function completeStream(streamId) {
     if (!entry || entry.complete) return;
     entry.complete = true;
     console.log(`[SLProxy] Stream ${streamId}: complete (${entry.buf.length} chars buffered)`);
+    
+    const parsedText = parseSSEText(entry.buf);
     for (const w of entry.waiters) {
         clearTimeout(w.timer);
-        try { w.res.json({ found: true, complete: true }); } catch { /* client gone */ }
+        try { w.res.json({ found: true, complete: true, text: parsedText }); } catch { /* client gone */ }
     }
     entry.waiters.clear();
     // Keep the entry briefly so a reconnect that arrives right after
@@ -99,7 +101,7 @@ app.get('/_slproxy/reconnect/:id', (req, res) => {
         return res.json({ found: false });
     }
     if (entry.complete) {
-        return res.json({ found: true, complete: true });
+        return res.json({ found: true, complete: true, text: parseSSEText(entry.buf) });
     }
 
     // Long-poll: park this response until completeStream() wakes it.
@@ -116,6 +118,42 @@ app.get('/_slproxy/reconnect/:id', (req, res) => {
         entry.waiters.delete(w);
     });
 });
+
+/* ─── SSE text extractor ───────────────────────────────────────── */
+
+/**
+ * Parse raw SSE data and extract the concatenated AI text.
+ * Handles OpenAI/OpenRouter, Claude (direct), and Gemini formats.
+ *
+ * @param {string} sseData
+ * @returns {string}
+ */
+function parseSSEText(sseData) {
+    let text = '';
+    for (const line of sseData.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        let json;
+        try { json = JSON.parse(data); } catch { continue; }
+
+        // OpenAI / most providers
+        const oaiDelta = json?.choices?.[0]?.delta?.content;
+        if (typeof oaiDelta === 'string') { text += oaiDelta; continue; }
+
+        // Claude direct API
+        if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta') {
+            text += json.delta.text ?? '';
+            continue;
+        }
+
+        // Gemini
+        const geminiText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof geminiText === 'string') { text += geminiText; continue; }
+    }
+    return text.trim();
+}
 
 /* Explicit stream clear (called when a normal recovery confirms success) */
 app.delete('/_slproxy/stream/:id', (req, res) => {

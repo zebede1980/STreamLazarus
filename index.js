@@ -171,6 +171,13 @@ async function attemptRecovery() {
                 hideBanner();
                 recovering = false;
                 const ctx = SillyTavern.getContext();
+
+                // Provide the text back to the client to either copy or insert
+                // because ST's backend does not auto-save interrupted SSE streams.
+                if (data.text) {
+                    await showRecoveryModal(data.text);
+                }
+
                 await ctx.reloadCurrentChat();
                 ctx.scrollChatToBottom();
                 toastr.success('Response recovered!', 'Stream Lazarus', { timeOut: 3000 });
@@ -369,6 +376,75 @@ function updateProxyStatus() {
         el.textContent = '\u2717 Not detected';
         el.className   = 'sl-plugin-status sl-plugin-missing';
     }
+}
+
+/* ─── Recovery Modal ──────────────────────────────────────────── */
+
+function showRecoveryModal(text) {
+    return new Promise(resolve => {
+        document.getElementById('sl-recovery-modal')?.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'sl-recovery-modal';
+        modal.innerHTML = `
+            <div class="sl-modal-backdrop">
+                <div class="sl-modal-box">
+                    <div class="sl-modal-header">
+                        <i class="fa-solid fa-truck-medical"></i>
+                        <span>Response Recovered</span>
+                    </div>
+                    <p class="sl-modal-hint">Your connection dropped, but the server finished generating. What would you like to do with the recovered text?</p>
+                    <div class="sl-modal-body">${escapeHTML(text)}</div>
+                    <div class="sl-modal-footer">
+                        <button class="sl-modal-btn sl-modal-copy" style="margin-right: auto;">
+                            <i class="fa-solid fa-copy"></i> Copy Text
+                        </button>
+                        <button class="sl-modal-btn sl-modal-insert" style="background: rgba(76, 175, 80, 0.2); color: #4caf50;">
+                            <i class="fa-solid fa-arrow-down-to-line"></i> Insert to Chat
+                        </button>
+                        <button class="sl-modal-btn sl-modal-close">
+                            Discard
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        modal.querySelector('.sl-modal-copy').addEventListener('click', async () => {
+            await navigator.clipboard.writeText(text);
+            toastr.success('Copied to clipboard!');
+        });
+
+        modal.querySelector('.sl-modal-insert').addEventListener('click', async () => {
+            const ctx = SillyTavern.getContext();
+            if (ctx.chat) {
+                const lastMsg = ctx.chat[ctx.chat.length - 1];
+                if (lastMsg && !lastMsg.is_user) {
+                    lastMsg.mes = text;
+                    if (Array.isArray(lastMsg.swipes) && lastMsg.swipes.length > 0) {
+                        lastMsg.swipes[lastMsg.swipe_id || 0] = text;
+                    }
+                }
+                
+                // Ask ST to save our newly patched message back to the server
+                if (typeof ctx.saveChat === 'function') await ctx.saveChat();
+                else if (typeof window.saveChat === 'function') await window.saveChat();
+            }
+            modal.remove();
+            resolve();
+        });
+
+        modal.querySelector('.sl-modal-close').addEventListener('click', () => {
+            modal.remove();
+            resolve();
+        });
+    });
+}
+
+function escapeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
 }
 
 /* ─── Lifecycle hooks ─────────────────────────────────────────── */
