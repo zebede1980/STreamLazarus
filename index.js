@@ -19,7 +19,7 @@ const EXPIRY_MS   = 30 * 60 * 1000; // 30 minutes
 
 /* ─── Default settings ────────────────────────────────────────── */
 
-const DEFAULT_SETTINGS = Object.freeze({ enabled: true });
+const DEFAULT_SETTINGS = Object.freeze({ enabled: true, autoInsert: false });
 
 /* ─── Module state ────────────────────────────────────────────── */
 
@@ -176,7 +176,11 @@ async function attemptRecovery() {
                 // because ST's backend does not auto-save interrupted SSE streams.
                 let recoveredViaModal = false;
                 if (data.text) {
-                    await showRecoveryModal(data.text);
+                    if (getSettings().autoInsert) {
+                        await insertRecoveredText(data.text);
+                    } else {
+                        await showRecoveryModal(data.text);
+                    }
                     recoveredViaModal = true;
                 }
 
@@ -372,6 +376,15 @@ function bindSettingsControls() {
             ctx.extensionSettings[MODULE_NAME].enabled = !!this.checked;
             saveSettings();
         });
+
+    $('#sl_auto_insert')
+        .prop('checked', settings.autoInsert)
+        .on('change', function () {
+            const ctx = SillyTavern.getContext();
+            ctx.extensionSettings[MODULE_NAME] ??= {};
+            ctx.extensionSettings[MODULE_NAME].autoInsert = !!this.checked;
+            saveSettings();
+        });
 }
 
 function updateProxyStatus() {
@@ -384,6 +397,52 @@ function updateProxyStatus() {
         el.textContent = '\u2717 Not detected';
         el.className   = 'sl-plugin-status sl-plugin-missing';
     }
+}
+
+/* ─── Recovery: shared insert logic ──────────────────────────── */
+
+/**
+ * Inserts recovered text into the chat programmatically.
+ * Shared by both the modal's Insert button and auto-insert mode.
+ */
+async function insertRecoveredText(text) {
+    const ctx = SillyTavern.getContext();
+    if (!ctx.chat) return;
+
+    const lastMsg = ctx.chat[ctx.chat.length - 1];
+    if (!lastMsg || lastMsg.is_user) {
+        let charName = 'AI';
+        if (ctx.characterId && ctx.characters?.[ctx.characterId]) {
+            charName = ctx.characters[ctx.characterId].name;
+        } else {
+            const lastAiMsg = [...ctx.chat].reverse().find(m => !m.is_user);
+            if (lastAiMsg && lastAiMsg.name) charName = lastAiMsg.name;
+        }
+        ctx.chat.push({
+            name: charName,
+            is_user: false,
+            is_name: true,
+            send_date: Date.now(),
+            mes: text,
+            swipes: [text],
+            swipe_id: 0,
+            extra: {}
+        });
+    } else {
+        lastMsg.mes = text;
+        if (Array.isArray(lastMsg.swipes)) {
+            if (lastMsg.swipes.length > 0) {
+                lastMsg.swipes[lastMsg.swipe_id || 0] = text;
+            } else {
+                lastMsg.swipes.push(text);
+                lastMsg.swipe_id = 0;
+            }
+        } else {
+            lastMsg.swipes = [text];
+            lastMsg.swipe_id = 0;
+        }
+    }
+    await forceSaveChat();
 }
 
 /* ─── Recovery Modal ──────────────────────────────────────────── */
@@ -425,51 +484,7 @@ function showRecoveryModal(text) {
         });
 
         modal.querySelector('.sl-modal-insert').addEventListener('click', async () => {
-            const ctx = SillyTavern.getContext();
-            if (ctx.chat) {
-                const lastMsg = ctx.chat[ctx.chat.length - 1];
-                
-                if (!lastMsg || lastMsg.is_user) {
-                    // The connection dropped before the AI's empty message shell was created.
-                    // We must push a new message object.
-                    let charName = 'AI';
-                    if (ctx.characterId && ctx.characters?.[ctx.characterId]) {
-                        charName = ctx.characters[ctx.characterId].name;
-                    } else {
-                        // Fallback: copy name from the last AI message in history
-                        const lastAiMsg = [...ctx.chat].reverse().find(m => !m.is_user);
-                        if (lastAiMsg && lastAiMsg.name) charName = lastAiMsg.name;
-                    }
-
-                    ctx.chat.push({
-                        name: charName,
-                        is_user: false,
-                        is_name: true,
-                        send_date: Date.now(),
-                        mes: text,
-                        swipes: [text],
-                        swipe_id: 0,
-                        extra: {}
-                    });
-                } else {
-                    // The AI message shell exists, update it.
-                    lastMsg.mes = text;
-                    if (Array.isArray(lastMsg.swipes)) {
-                        if (lastMsg.swipes.length > 0) {
-                            lastMsg.swipes[lastMsg.swipe_id || 0] = text;
-                        } else {
-                            lastMsg.swipes.push(text);
-                            lastMsg.swipe_id = 0;
-                        }
-                    } else {
-                        lastMsg.swipes = [text];
-                        lastMsg.swipe_id = 0;
-                    }
-                }
-                
-                // Ask ST to save our newly patched message back to the server
-                await forceSaveChat();
-            }
+            await insertRecoveredText(text);
             modal.remove();
             resolve(true);
         });
