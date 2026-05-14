@@ -19,7 +19,7 @@ const EXPIRY_MS   = 30 * 60 * 1000; // 30 minutes
 
 /* ─── Default settings ────────────────────────────────────────── */
 
-const DEFAULT_SETTINGS = Object.freeze({ enabled: true, autoInsert: false });
+const DEFAULT_SETTINGS = Object.freeze({ enabled: true, autoInsert: false, mobileOnly: true });
 
 /* ─── Module state ────────────────────────────────────────────── */
 
@@ -68,6 +68,36 @@ function clearPending() {
     log('Pending cleared.');
 }
 
+/* ─── Mobile detection ───────────────────────────────────────── */
+
+/**
+ * Returns true when the current device looks like a mobile/tablet.
+ * Covers:
+ *   - iOS (iPhone / iPod / iPad, including iPad in desktop-mode which
+ *     reports a Mac UA but exposes touch points)
+ *   - Android phones & tablets
+ *   - Other common mobile UA strings
+ */
+function isMobileDevice() {
+    const ua = navigator.userAgent;
+    if (/iPhone|iPod|Android|Mobile|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return true;
+    // iPad — both native UA and desktop-mode (reports Macintosh but has touch)
+    if (/iPad/i.test(ua)) return true;
+    if (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1) return true;
+    return false;
+}
+
+/**
+ * Central gate: returns true when the extension should actually do work.
+ * Respects both the enabled toggle and the mobileOnly toggle.
+ */
+function isOperational() {
+    const s = getSettings();
+    if (!s.enabled) return false;
+    if (s.mobileOnly && !isMobileDevice()) return false;
+    return true;
+}
+
 /* ─── Proxy health check ──────────────────────────────────────── */
 
 async function checkProxy() {
@@ -97,7 +127,7 @@ function installFetchInterceptor() {
         const urlStr = typeof url === 'string' ? url : String(url);
         const isGenerate = /\/api\/.*\/generate\/?$/.test(urlStr);
 
-        if (isGenerate && getSettings().enabled && proxyActive) {
+        if (isGenerate && isOperational() && proxyActive) {
             // Pre-generate the stream ID so we save it BEFORE the network round-trip.
             // If the user locks their phone during prompt processing, the fetch promise
             // might never resolve, so we must save our state immediately.
@@ -249,7 +279,7 @@ let visibilityCheckTimeout = null;
 
 async function onVisibilityChange() {
     if (document.visibilityState !== 'visible') return;
-    if (!getSettings().enabled) return;
+    if (!isOperational()) return;
     if (recovering) return;
 
     // Debounce to prevent multiple triggers from focus/pageshow/visibilitychange firing together
@@ -286,7 +316,7 @@ function onChatChanged() {
 }
 
 function checkPendingOnChatLoad() {
-    if (!getSettings().enabled) return;
+    if (!isOperational()) return;
     const pending = loadPending();
     if (!pending) return;
     const ctx = SillyTavern.getContext();
@@ -364,7 +394,7 @@ function bindSettingsControls() {
             const btn = document.getElementById('sl_proxy_recheck');
             if (btn) btn.disabled = true;
             await checkProxy();
-            if (!fetchInterceptorActive && proxyActive) installFetchInterceptor();
+            if (!fetchInterceptorActive && proxyActive && isOperational()) installFetchInterceptor();
             if (btn) btn.disabled = false;
         });
 
@@ -384,6 +414,21 @@ function bindSettingsControls() {
             ctx.extensionSettings[MODULE_NAME] ??= {};
             ctx.extensionSettings[MODULE_NAME].autoInsert = !!this.checked;
             saveSettings();
+        });
+
+    $('#sl_mobile_only')
+        .prop('checked', settings.mobileOnly)
+        .on('change', function () {
+            const ctx = SillyTavern.getContext();
+            ctx.extensionSettings[MODULE_NAME] ??= {};
+            ctx.extensionSettings[MODULE_NAME].mobileOnly = !!this.checked;
+            saveSettings();
+            // Re-install or remove the fetch interceptor based on new setting.
+            if (isOperational() && proxyActive) {
+                installFetchInterceptor();
+            } else {
+                removeFetchInterceptor();
+            }
         });
 }
 
@@ -530,7 +575,7 @@ export function onDisable() {
         window.addEventListener('pageshow', onVisibilityChange);
         createBanner();
         const active = await checkProxy();
-        if (active) installFetchInterceptor();
+        if (active && isOperational()) installFetchInterceptor();
         updateProxyStatus();
         log('Ready. Proxy:', proxyActive);
     });
