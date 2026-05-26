@@ -185,6 +185,13 @@ async function attemptRecovery() {
     // and retry automatically until the page is hidden or we time out.
     let attempts = 0;
     while (document.visibilityState === 'visible' && attempts < 72) { // max ~6 min
+        if (!loadPending()) {
+            log('Pending state cleared (user changed chat or stopped). Aborting recovery.');
+            recovering = false;
+            hideBanner();
+            return;
+        }
+
         try {
             const ctrl  = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 35_000);
@@ -194,6 +201,13 @@ async function attemptRecovery() {
             );
             clearTimeout(timer);
             const data = await resp.json();
+
+            if (!loadPending()) {
+                log('Pending state cleared during long-poll. Aborting recovery.');
+                recovering = false;
+                hideBanner();
+                return;
+            }
 
             if (data.complete) {
                 // Proxy has finished buffering — ST saved the chat. Reload.
@@ -207,9 +221,9 @@ async function attemptRecovery() {
                 let recoveredViaModal = false;
                 if (data.text) {
                     if (getSettings().autoInsert) {
-                        await insertRecoveredText(data.text);
+                        await insertRecoveredText(data.text, pending.chatId);
                     } else {
-                        await showRecoveryModal(data.text);
+                        await showRecoveryModal(data.text, pending.chatId);
                     }
                     recoveredViaModal = true;
                 }
@@ -289,6 +303,14 @@ async function onVisibilityChange() {
         const pending = loadPending();
         if (!pending) return;
 
+        const ctx = SillyTavern.getContext();
+        const currentChatId = ctx.getCurrentChatId?.() ?? ctx.chatId;
+
+        if (currentChatId !== pending.chatId || !ctx.chat || ctx.chat.length === 0) {
+            log('Visibility changed, but chat not fully loaded or mismatched. Deferring to onChatChanged.');
+            return;
+        }
+
         log('Page visible — pending recovery present, starting…');
         toastr.info('Checking for response\u2026', 'Stream Lazarus', { timeOut: 2000 });
         await attemptRecovery();
@@ -308,21 +330,25 @@ function onGenerationStopped() {
 }
 
 function onChatChanged() {
-    clearPending();
+    const pending = loadPending();
     recovering = false;
     hideBanner();
-    // Check if we have a pending for this newly-loaded chat (page reload path).
-    checkPendingOnChatLoad();
+
+    if (pending) {
+        const ctx = SillyTavern.getContext();
+        const chatId = ctx.getCurrentChatId?.() ?? ctx.chatId;
+        if (chatId === pending.chatId) {
+            checkPendingOnChatLoad(pending);
+            return;
+        }
+    }
+
+    clearPending();
 }
 
-function checkPendingOnChatLoad() {
+function checkPendingOnChatLoad(pending) {
     if (!isOperational()) return;
-    const pending = loadPending();
-    if (!pending) return;
     const ctx = SillyTavern.getContext();
-    const chatId = ctx.getCurrentChatId?.();
-    if (!chatId || chatId !== pending.chatId) return;
-    // Last message is already an AI reply — ST saved it; nothing to do.
     const last = ctx.chat?.[ctx.chat.length - 1];
     if (last && !last.is_user) { clearPending(); return; }
     // Page reloaded mid-generation — attempt recovery after a short delay.
@@ -450,9 +476,22 @@ function updateProxyStatus() {
  * Inserts recovered text into the chat programmatically.
  * Shared by both the modal's Insert button and auto-insert mode.
  */
-async function insertRecoveredText(text) {
+async function insertRecoveredText(text, pendingChatId) {
     const ctx = SillyTavern.getContext();
     if (!ctx.chat) return;
+
+    if (ctx.chat.length === 0) {
+        console.warn(LOG_PREFIX, 'Aborting insert: chat history is empty, likely still loading.');
+        toastr.error('Chat history not loaded. Cannot insert recovered text safely.', 'Stream Lazarus');
+        return;
+    }
+
+    const currentChatId = ctx.getCurrentChatId?.() ?? ctx.chatId;
+    if (pendingChatId && currentChatId !== pendingChatId) {
+        console.warn(LOG_PREFIX, `Aborting insert: active chat (${currentChatId}) does not match pending chat (${pendingChatId}).`);
+        toastr.error('Chat changed. Cannot insert recovered text.', 'Stream Lazarus');
+        return;
+    }
 
     const lastMsg = ctx.chat[ctx.chat.length - 1];
     if (!lastMsg || lastMsg.is_user) {
@@ -492,7 +531,7 @@ async function insertRecoveredText(text) {
 
 /* ─── Recovery Modal ──────────────────────────────────────────── */
 
-function showRecoveryModal(text) {
+function showRecoveryModal(text, pendingChatId) {
     return new Promise(resolve => {
         document.getElementById('sl-recovery-modal')?.remove();
 
@@ -529,7 +568,7 @@ function showRecoveryModal(text) {
         });
 
         modal.querySelector('.sl-modal-insert').addEventListener('click', async () => {
-            await insertRecoveredText(text);
+            await insertRecoveredText(text, pendingChatId);
             modal.remove();
             resolve(true);
         });
