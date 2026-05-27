@@ -165,6 +165,10 @@ function removeFetchInterceptor() {
 /* ─── Recovery ────────────────────────────────────────────────── */
 
 async function attemptRecovery() {
+    // Guard against two code paths (onVisibilityChange + checkPendingOnChatLoad)
+    // both entering here concurrently.  JS is single-threaded but async, so a
+    // second caller can enter before the first one's initial `await` returns.
+    if (recovering) { log('Recovery already in progress — skipping duplicate call.'); return; }
     const pending = loadPending();
     if (!pending) return;
 
@@ -355,6 +359,7 @@ function checkPendingOnChatLoad(pending) {
     log('Chat loaded with pending recovery — scheduling…');
     setTimeout(async () => {
         if (!loadPending()) return; // already cleared
+        if (recovering) return;    // onVisibilityChange beat us to it
         toastr.info('Checking for missed response\u2026', 'Stream Lazarus', { timeOut: 3000 });
         await attemptRecovery();
     }, 1500);
