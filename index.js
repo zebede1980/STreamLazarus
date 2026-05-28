@@ -214,14 +214,21 @@ async function attemptRecovery() {
             }
 
             if (data.complete) {
-                // Proxy has finished buffering — ST saved the chat. Reload.
+                // Clear pending BEFORE reloadCurrentChat so the onChatChanged event
+                // it fires sees no pending entry and does not schedule another recovery.
                 clearPending();
                 hideBanner();
-                recovering = false;
                 const ctx = SillyTavern.getContext();
 
-                // Provide the text back to the client to either copy or insert
-                // because ST's backend does not auto-save interrupted SSE streams.
+                // Reload from disk FIRST.  ST's backend may have saved a partial
+                // response (often just the thinking block) while the iOS client was
+                // disconnected.  Reloading now surfaces that partial save so the
+                // subsequent insert can overwrite it with the full proxy-buffered text.
+                await ctx.reloadCurrentChat();
+
+                // Insert the full proxy-buffered text on top of whatever ST had on disk.
+                // This is now the final state the user sees — no further reload will
+                // clobber it.
                 let recoveredViaModal = false;
                 if (data.text) {
                     if (getSettings().autoInsert) {
@@ -232,9 +239,10 @@ async function attemptRecovery() {
                     recoveredViaModal = true;
                 }
 
-                await ctx.reloadCurrentChat();
+                // Release the lock only after all async work is complete.
+                recovering = false;
                 ctx.scrollChatToBottom();
-                
+
                 const last = ctx.chat?.[ctx.chat.length - 1];
                 if (recoveredViaModal || (last && !last.is_user)) {
                     toastr.success('Response recovered!', 'Stream Lazarus', { timeOut: 3000 });
