@@ -227,8 +227,6 @@ async function attemptRecovery() {
                 await ctx.reloadCurrentChat();
 
                 // Insert the full proxy-buffered text on top of whatever ST had on disk.
-                // This is now the final state the user sees — no further reload will
-                // clobber it.
                 let recoveredViaModal = false;
                 if (data.text) {
                     if (getSettings().autoInsert) {
@@ -238,6 +236,12 @@ async function attemptRecovery() {
                     }
                     recoveredViaModal = true;
                 }
+
+                // Reload again to re-render the UI with the text that was just saved
+                // to disk by insertRecoveredText.  Without this second reload the
+                // insert modifies ctx.chat and saves to disk but the visible chat
+                // thread never updates.
+                await ctx.reloadCurrentChat();
 
                 // Release the lock only after all async work is complete.
                 recovering = false;
