@@ -185,10 +185,13 @@ async function attemptRecovery() {
     // Poll the proxy's reconnect endpoint.
     // The endpoint long-polls (holds the connection open) while the stream is
     // still in progress, so we get notified the moment ST finishes.
-    // We use a 35 s client-side abort to protect against idle connections
-    // and retry automatically until the page is hidden or we time out.
+    // We use a 55 s client-side abort (up to 6 retries = 5.5 min, aligned with
+    // the proxy's 5-minute waiter timeout) and retry automatically until the
+    // page is hidden or we time out.
     let attempts = 0;
-    while (document.visibilityState === 'visible' && attempts < 72) { // max ~6 min
+    const MAX_ATTEMPTS = 6;   // 6 × 55 s = 5.5 min — aligns with proxy's 5-min waiter timeout
+    const POLL_TIMEOUT  = 55_000;
+    while (document.visibilityState === 'visible' && attempts < MAX_ATTEMPTS) {
         if (!loadPending()) {
             log('Pending state cleared (user changed chat or stopped). Aborting recovery.');
             recovering = false;
@@ -198,7 +201,7 @@ async function attemptRecovery() {
 
         try {
             const ctrl  = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 35_000);
+            const timer = setTimeout(() => ctrl.abort(), POLL_TIMEOUT);
             const resp  = await fetch(
                 `/_slproxy/reconnect/${pending.streamId}`,
                 { credentials: 'include', signal: ctrl.signal },
@@ -229,19 +232,26 @@ async function attemptRecovery() {
                 // Insert the full proxy-buffered text on top of whatever ST had on disk.
                 let recoveredViaModal = false;
                 if (data.text) {
-                    if (getSettings().autoInsert) {
-                        await insertRecoveredText(data.text, pending.chatId);
-                    } else {
-                        await showRecoveryModal(data.text, pending.chatId);
+                    try {
+                        if (getSettings().autoInsert) {
+                            await insertRecoveredText(data.text, pending.chatId);
+                        } else {
+                            await showRecoveryModal(data.text, pending.chatId);
+                        }
+                        recoveredViaModal = true;
+                        // Reload to re-render the UI with the text that was just saved
+                        // to disk by insertRecoveredText.  Only do this if the save
+                        // succeeded — a failed save means reloading would wipe the
+                        // in-memory state with stale disk content.
+                        await ctx.reloadCurrentChat();
+                    } catch (e) {
+                        log('Insert/save failed — skipping reload to preserve in-memory state:', e.message);
+                        toastr.error('Recovery partial — response may not be saved. Copy text to be safe.', 'Stream Lazarus', { timeOut: 8000 });
+                        recoveredViaModal = false;
                     }
-                    recoveredViaModal = true;
+                } else {
+                    await ctx.reloadCurrentChat();
                 }
-
-                // Reload again to re-render the UI with the text that was just saved
-                // to disk by insertRecoveredText.  Without this second reload the
-                // insert modifies ctx.chat and saves to disk but the visible chat
-                // thread never updates.
-                await ctx.reloadCurrentChat();
 
                 // Release the lock only after all async work is complete.
                 recovering = false;
@@ -306,11 +316,25 @@ async function directReloadFallback() {
 /* ─── Visibility handler ──────────────────────────────────────── */
 
 let visibilityCheckTimeout = null;
+let lastHiddenTime = 0;
 
 async function onVisibilityChange() {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState === 'hidden') {
+        lastHiddenTime = Date.now();
+        return;
+    }
+    // —— visible ——
     if (!isOperational()) return;
     if (recovering) return;
+
+    // Require at least 5 seconds hidden before attempting recovery.
+    // This filters out quick visibility toggles from Face ID, Notification Center
+    // swipe-down, and other transient iOS system UI that fires spurious events.
+    const awayDuration = Date.now() - lastHiddenTime;
+    if (awayDuration < 5_000) {
+        log(`Visibility restored after ${awayDuration}ms — too short, ignoring.`);
+        return;
+    }
 
     // Debounce to prevent multiple triggers from focus/pageshow/visibilitychange firing together
     // and give TouchID/FaceID unlock animations a moment to settle.
@@ -532,16 +556,13 @@ async function insertRecoveredText(text, pendingChatId) {
     } else {
         lastMsg.mes = text;
         if (Array.isArray(lastMsg.swipes)) {
-            if (lastMsg.swipes.length > 0) {
-                lastMsg.swipes[lastMsg.swipe_id || 0] = text;
-            } else {
-                lastMsg.swipes.push(text);
-                lastMsg.swipe_id = 0;
-            }
+            // Always write to index 0 — recovered text replaces the active message content.
+            // Avoid using raw swipe_id which may be out of bounds for the current array.
+            lastMsg.swipes[0] = text;
         } else {
             lastMsg.swipes = [text];
-            lastMsg.swipe_id = 0;
         }
+        lastMsg.swipe_id = 0;
     }
     await forceSaveChat();
 }
@@ -652,21 +673,18 @@ async function forceSaveChat() {
     }
 
     const chatId = ctx.getCurrentChatId?.() ?? ctx.chatId;
-    if (!chatId) return;
+    if (!chatId) throw new Error('No chat ID available for save');
 
-    try {
-        await fetch('/api/chats/save', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': window['csrf_token'] || ctx.csrfToken || '',
-            },
-            body: JSON.stringify({ chat: chatId, data: ctx.chat })
-        });
-        log('Chat saved via fallback API.');
-    } catch (e) {
-        console.error(LOG_PREFIX, 'Failed to save chat via API fallback', e);
-    }
+    const resp = await fetch('/api/chats/save', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': window['csrf_token'] || ctx.csrfToken || '',
+        },
+        body: JSON.stringify({ chat: chatId, data: ctx.chat })
+    });
+    if (!resp.ok) throw new Error(`Save API returned ${resp.status}`);
+    log('Chat saved via fallback API.');
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

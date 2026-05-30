@@ -224,8 +224,12 @@ app.post(
         fwd['content-length'] = String(bodyBuf.length);
 
         // Track whether the iOS client is still connected.
+        // Only mark as gone on premature close — a clean close after res.end()
+        // is expected and should not stop the final chunks from forwarding.
         let clientAlive = true;
-        res.on('close', () => { clientAlive = false; });
+        res.on('close', () => {
+            if (!res.writableEnded) clientAlive = false;
+        });
 
         const loopReq = http.request(
             { hostname: ST_HOST, port: ST_PORT, path: req.url, method: 'POST', headers: fwd },
