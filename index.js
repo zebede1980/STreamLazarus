@@ -119,6 +119,10 @@ async function checkProxy() {
  * Does NOT change any URLs — the proxy is already transparent.
  * Reads the X-SL-Stream-Id header from generate responses and stores
  * it in localStorage so recovery can target the exact stream.
+ *
+ * Also detects WHY a generate fetch failed:
+ *   - AbortError  → user clicked Stop → clear pending
+ *   - TypeError / network error → iOS disconnect → KEEP pending for recovery
  */
 function installFetchInterceptor() {
     if (fetchInterceptorActive) return;
@@ -127,11 +131,12 @@ function installFetchInterceptor() {
         const urlStr = typeof url === 'string' ? url : String(url);
         const isGenerate = /\/api\/.*\/generate\/?$/.test(urlStr);
 
+        let streamId = null;
         if (isGenerate && isOperational() && proxyActive) {
             // Pre-generate the stream ID so we save it BEFORE the network round-trip.
             // If the user locks their phone during prompt processing, the fetch promise
             // might never resolve, so we must save our state immediately.
-            const streamId = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
+            streamId = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
             
             options = options || {};
             options.headers = options.headers || {};
@@ -147,8 +152,24 @@ function installFetchInterceptor() {
             savePending(chatId, streamId);
         }
 
-        // Let the request proceed normally
-        return await originalFetch(url, options);
+        try {
+            // Let the request proceed normally
+            return await originalFetch(url, options);
+        } catch (e) {
+            // A generate fetch failed.  Why?
+            //   AbortError  → user clicked Stop → clear pending (no recovery needed)
+            //   TypeError   → iOS killed the TCP connection → keep pending (recovery WILL be needed)
+            //   Other       → unknown → keep pending to be safe
+            if (isGenerate && streamId) {
+                if (e.name === 'AbortError') {
+                    log('Generate fetch aborted by user — clearing pending.');
+                    clearPending();
+                } else {
+                    log('Generate fetch failed (likely iOS disconnect):', e.name, e.message, '— keeping pending for recovery.');
+                }
+            }
+            throw e; // re-throw so ST's own error handling can react
+        }
     };
     fetchInterceptorActive = true;
     log('Fetch interceptor installed.');
@@ -316,25 +337,11 @@ async function directReloadFallback() {
 /* ─── Visibility handler ──────────────────────────────────────── */
 
 let visibilityCheckTimeout = null;
-let lastHiddenTime = 0;
 
 async function onVisibilityChange() {
-    if (document.visibilityState === 'hidden') {
-        lastHiddenTime = Date.now();
-        return;
-    }
-    // —— visible ——
+    if (document.visibilityState !== 'visible') return;
     if (!isOperational()) return;
     if (recovering) return;
-
-    // Require at least 5 seconds hidden before attempting recovery.
-    // This filters out quick visibility toggles from Face ID, Notification Center
-    // swipe-down, and other transient iOS system UI that fires spurious events.
-    const awayDuration = Date.now() - lastHiddenTime;
-    if (awayDuration < 5_000) {
-        log(`Visibility restored after ${awayDuration}ms — too short, ignoring.`);
-        return;
-    }
 
     // Debounce to prevent multiple triggers from focus/pageshow/visibilitychange firing together
     // and give TouchID/FaceID unlock animations a moment to settle.
@@ -365,8 +372,27 @@ function onGenerationComplete() {
     clearPending();
 }
 
+/**
+ * GENERATION_STOPPED fires for both user-initiated stops AND
+ * network-disconnect-induced stops (iOS lock).  We handle the
+ * distinction in the fetch interceptor, which checks the rejection
+ * reason:
+ *   - AbortError  → user clicked Stop → interceptor clears pending
+ *   - TypeError   → iOS disconnect   → interceptor KEEPS pending
+ *
+ * By the time this handler runs, the interceptor has already made
+ * the right decision.  We just do a safety double-check: if pending
+ * still exists AND the user intentionally stopped, we want to tell
+ * the proxy to discard the stream entry so it doesn't linger.
+ *
+ * But since we can't know the intent here, and the interceptor handled
+ * the AbortError case, we simply do nothing — the interceptor owns
+ * the clear/keep decision.
+ */
 function onGenerationStopped() {
-    clearPending();
+    // No-op: the fetch interceptor handles clearPending() for AbortError
+    // (user stop).  For network failures (iOS disconnect), pending is kept
+    // for recovery.
 }
 
 function onChatChanged() {
