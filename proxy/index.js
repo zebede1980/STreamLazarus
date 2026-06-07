@@ -308,6 +308,24 @@ const stProxy = createProxyMiddleware({
 
 app.use('/', stProxy);
 
+/* ─── Garbage Collection ────────────────────────────────────────── */
+
+// Clean up streams that never completed and exceeded expiry
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, entry] of streams.entries()) {
+        if (now - entry.ts > EXPIRY_MS) {
+            console.log(`[SLProxy] Stream ${id}: garbage collected (abandoned)`);
+            for (const w of entry.waiters) {
+                clearTimeout(w.timer);
+                try { w.res.json({ found: false }); } catch { /* ignore */ }
+            }
+            entry.waiters.clear();
+            streams.delete(id);
+        }
+    }
+}, 5 * 60 * 1000); // Run every 5 minutes
+
 /* ─── HTTP server ───────────────────────────────────────────────── */
 
 const server = http.createServer(app);

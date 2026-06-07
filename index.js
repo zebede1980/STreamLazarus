@@ -523,6 +523,26 @@ function bindSettingsControls() {
                 removeFetchInterceptor();
             }
         });
+
+    document.getElementById('sl_hard_reset')
+        ?.addEventListener('click', async () => {
+            const pending = loadPending();
+            if (pending && proxyActive) {
+                try {
+                    // Utilize the dormant explicit stream clear endpoint in the proxy
+                    await fetch(`/_slproxy/stream/${pending.streamId}`, { 
+                        method: 'DELETE', 
+                        credentials: 'include' 
+                    });
+                } catch (e) {
+                    log('Failed to clear stream on proxy:', e.message);
+                }
+            }
+            clearPending();
+            recovering = false;
+            hideBanner();
+            toastr.success('Stream Lazarus state has been reset.', 'Stream Lazarus');
+        });
 }
 
 function updateProxyStatus() {
@@ -581,14 +601,13 @@ async function insertRecoveredText(text, pendingChatId) {
         });
     } else {
         lastMsg.mes = text;
+        const targetSwipeId = lastMsg.swipe_id != null && lastMsg.swipe_id >= 0 ? lastMsg.swipe_id : 0;
         if (Array.isArray(lastMsg.swipes)) {
-            // Always write to index 0 — recovered text replaces the active message content.
-            // Avoid using raw swipe_id which may be out of bounds for the current array.
-            lastMsg.swipes[0] = text;
+            lastMsg.swipes[targetSwipeId] = text;
         } else {
-            lastMsg.swipes = [text];
+            lastMsg.swipes = [];
+            lastMsg.swipes[targetSwipeId] = text;
         }
-        lastMsg.swipe_id = 0;
     }
     await forceSaveChat();
 }
